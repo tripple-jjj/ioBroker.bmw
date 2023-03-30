@@ -2,6 +2,7 @@
 
 /*
  * Created with @iobroker/create-adapter v1.34.1
+ * 
  */
 
 // The adapter-core module gives you access to the core ioBroker functions
@@ -67,7 +68,7 @@ class Bmw extends utils.Adapter {
       await this.cleanObjects();
 
       this.log.info(`Start getting ${this.config.brand} vehicles`);
-      await this.getVehiclesv2(true);
+      await this.getVehiclesv2();
       this.updateInterval = setInterval(async () => {
         await this.getVehiclesv2();
       }, this.config.interval * 60 * 1000);
@@ -250,7 +251,7 @@ class Bmw extends utils.Adapter {
         error.response && this.log.error(JSON.stringify(error.response.data));
       });
   }
-  async getVehiclesv2(firstStart) {
+  async getVehiclesv2() {
     const brand = this.config.brand;
     const headers = {
       "user-agent": this.userAgentDart,
@@ -260,6 +261,8 @@ class Bmw extends utils.Adapter {
       host: "cocoapi.bmwgroup.com",
       "24-hour-format": "true",
     };
+   
+    this.log.debug("GET vehiclesv2  request executed: headers: " + JSON.stringify(headers));
 
     await this.requestClient({
       method: "get",
@@ -267,10 +270,9 @@ class Bmw extends utils.Adapter {
       headers: headers,
     })
       .then(async (res) => {
+        
         this.log.debug(JSON.stringify(res.data));
-        if (firstStart) {
-          this.log.info(`Found ${res.data.length} ${brand} vehicles`);
-        }
+        this.log.info(`Found ${res.data.length} ${brand} vehicles`);
         if (res.data.length === 0) {
           this.log.info(`No ${brand} vehicles found please check brand in instance settings`);
           return;
@@ -308,7 +310,9 @@ class Bmw extends utils.Adapter {
             { command: "climate-now_START" },
             { command: "climate-now_STOP" },
             { command: "force-refresh", name: "Force Refresh" },
+            { command: "charging-profile", name: "true: immideate_charging" }  // added to switch between IMMIDEATE and DELAYED charging in charging profile
           ];
+
           remoteArray.forEach((remote) => {
             this.setObjectNotExists(vehicle.vin + ".remotev2." + remote.command, {
               type: "state",
@@ -371,7 +375,7 @@ class Bmw extends utils.Adapter {
     urlArray.push({
       url: "https://cocoapi.bmwgroup.com/eadrax-chs/v1/charging-statistics?vin=" + vin + "&currentDate=" + fullDate,
       path: ".charging-statistics.",
-      name: "charging statistics",
+      name: "Charging statistics",
     });
     for (const element of urlArray) {
       await this.requestClient({
@@ -392,31 +396,8 @@ class Bmw extends utils.Adapter {
             },
             native: {},
           });
-          await this.extractKeys(this, vin + element.path + dateFormatted, data);
 
-          if (element.name === "chargingSessions" && data.sessions && data.sessions.length > 0) {
-            try {
-              const datal = data.sessions[0];
-              datal._date = datal.id.split("_")[0];
-              datal._id = datal.id.split("_")[1];
-              datal.timestamp = new Date(datal._date).valueOf();
-              if (datal.energyCharged.replace) {
-                datal.energy = datal.energyCharged.replace("~", "").trim().split(" ")[0];
-                datal.unit = datal.energyCharged.replace("~", "").trim().split(" ")[1];
-              }
-              datal.id = "latest";
-              await this.setObjectNotExistsAsync(vin + element.path + "latest", {
-                type: "channel",
-                common: {
-                  name: element.name + "latest of the car v2",
-                },
-                native: {},
-              });
-              await this.extractKeys(this, vin + element.path + "latest", datal);
-            } catch (error) {
-              this.log.debug(error);
-            }
-          }
+          this.extractKeys(this, vin + element.path + dateFormatted, data);
         })
         .catch((error) => {
           if (error.response) {
@@ -515,12 +496,14 @@ class Bmw extends utils.Adapter {
     }
   }
 
+  
   /**
    * Is called if a subscribed state changes
    * @param {string} id
    * @param {ioBroker.State | null | undefined} state
    */
   async onStateChange(id, state) {
+
     if (state) {
       if (!state.ack) {
         if (id.indexOf(".remotev2.") === -1) {
@@ -546,22 +529,40 @@ class Bmw extends utils.Adapter {
           "accept-language": "de-DE",
           host: "cocoapi.bmwgroup.com",
           "24-hour-format": "true",
-          "Content-Type": "text/plain",
+          "Content-Type": "application/json",  
         };
         let url = "https://cocoapi.bmwgroup.com/eadrax-vrccs/v2/presentation/remote-commands/" + vin + "/" + command;
         if (action) {
           url += "?action=" + action;
         }
 
+        let requestData;
+        //  special case: for charging schedule jason data must be sent with the command
+        if (command == 'charging-profile') {
+          url = "https://cocoapi.bmwgroup.com/eadrax-crccs/v1/vehicles/" + vin + "/" + command;          
+
+          //toDo: replace fixed data by dynamic data 
+          if (state==true) {
+            // CHARGING_IMMEDIATELY
+            requestData = JSON.parse('{"chargingMode": {"chargingPreference": "CHARGING_WINDOW", "endTimeSlot": "0001-01-01T16:30:00.000", "startTimeSlot": "0001-01-01T11:00:00.000", "type": "CHARGING_IMMEDIATELY", "timerChange": "NO_CHANGE"}, "departureTimer": {"type": "WEEKLY_DEPARTURE_TIMER", "weeklyTimers": [{"daysOfTheWeek": ["WEDNESDAY"], "id": 1, "time": "0001-01-01T16:00:00.000", "timerAction": "ACTIVATE"}, {"daysOfTheWeek": [], "id": 2, "time": "0001-01-01T11:15:00.000", "timerAction": "DEACTIVATE"}, {"daysOfTheWeek": [], "id": 3, "time": "0001-01-01T15:00:00.000", "timerAction": "DEACTIVATE"}, {"daysOfTheWeek": ["WEDNESDAY"], "id": 4, "time": "0001-01-01T16:00:00.000", "timerAction": "DEACTIVATE"}]}, "isPreconditionForDepartureActive": "False", "servicePack": "ATM"}');
+          } else {
+            // TIME_SLOT (=delayed Charging)
+            requestData = JSON.parse('{"chargingMode": {"chargingPreference": "CHARGING_WINDOW", "endTimeSlot": "0001-01-01T16:30:00.000", "startTimeSlot": "0001-01-01T11:00:00.000", "type": "TIME_SLOT"           , "timerChange": "NO_CHANGE"}, "departureTimer": {"type": "WEEKLY_DEPARTURE_TIMER", "weeklyTimers": [{"daysOfTheWeek": ["WEDNESDAY"], "id": 1, "time": "0001-01-01T16:00:00.000", "timerAction": "ACTIVATE"}, {"daysOfTheWeek": [], "id": 2, "time": "0001-01-01T11:15:00.000", "timerAction": "DEACTIVATE"}, {"daysOfTheWeek": [], "id": 3, "time": "0001-01-01T15:00:00.000", "timerAction": "DEACTIVATE"}, {"daysOfTheWeek": ["WEDNESDAY"], "id": 4, "time": "0001-01-01T16:00:00.000", "timerAction": "DEACTIVATE"}]}, "isPreconditionForDepartureActive": "False", "servicePack": "ATM"}');
+          }
+        }
+        this.log.debug("Remote command prepared: " + url + " with data: " + requestData + " headers: " + JSON.stringify(headers)); // added  12.03.2023
+
         await this.requestClient({
           method: "post",
           url: url,
           headers: headers,
+          data: requestData
         })
           .then((res) => {
-            this.log.debug(JSON.stringify(res.data));
+            this.log.debug("Remote command executed: " + url + " with data: " + JSON.stringify(requestData)); // added  12.03.2023
+            this.log.debug("Response: " + JSON.stringify(res.data));
             return res.data;
-          })
+          }) 
           .catch((error) => {
             this.log.error("Remote command failed");
             this.log.error(error);
@@ -603,6 +604,7 @@ class Bmw extends utils.Adapter {
       }
     }
   }
+
 }
 
 if (require.main !== module) {
